@@ -1,0 +1,226 @@
+// ==========================================================================
+// سامانه مدیریت جلسات و صورتجلسات ادب‌ویزا - اسکیمای دیتابیس
+// ==========================================================================
+// برای توسعه از SQLite استفاده شده. برای انتقال به سرور واقعی کافی‌ست
+// provider را به "mysql" یا "postgresql" تغییر داده و DATABASE_URL را در
+// فایل .env اصلاح کنید. تمام مدل‌ها با MySQL/Postgres سازگارند.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// --------------------------------------------------------------------------
+// نقش‌های سازمانی (سلسله‌مراتب دسترسی)
+// --------------------------------------------------------------------------
+enum Role {
+  SUPER_ADMIN   // مدیرکل - دسترسی کامل به همه‌چیز
+  CEO           // مدیرعامل
+  DEPUTY        // قائم مقام
+  UNIT_MANAGER  // مدیر واحد
+  SUPERVISOR    // سرپرست
+  STAFF         // کارمند
+}
+
+// واحد سازمانی (مالی، مارکتینگ، فروش، مدیریت داخلی و ...)
+// ساختار درختی است تا سلسله‌مراتب واحدها هم قابل تعریف باشد
+model Unit {
+  id          String   @id @default(cuid())
+  name        String   // مثلا: واحد مارکتینگ
+  code        String   @unique // حرف/کد اختصاری واحد برای شماره‌گذاری صورتجلسه، مثلا "الف"
+  colorHex    String   @default("#1f2c4d") // رنگ اختصاصی واحد در نمودارها و برچسب‌ها
+  parentId    String?
+  parent      Unit?    @relation("UnitHierarchy", fields: [parentId], references: [id])
+  children    Unit[]   @relation("UnitHierarchy")
+  description String?
+  users       User[]
+  minuteSeq   Int      @default(0) // شمارنده صورتجلسات این واحد برای تولید شماره خودکار
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model User {
+  id             String   @id @default(cuid())
+  fullName       String
+  phone          String   @unique
+  email          String?  @unique
+  passwordHash   String
+  avatarUrl      String?
+  position       String?  // سمت سازمانی، مثلا "کارشناس ارشد مارکتینگ"
+  role           Role     @default(STAFF)
+  unitId         String?
+  unit           Unit?    @relation(fields: [unitId], references: [id])
+  isActive       Boolean  @default(true)
+  notifyByInApp  Boolean  @default(true)
+  notifyBySms    Boolean  @default(true)
+  bio            String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  // ارتباطات
+  createdMeetings     Meeting[]        @relation("MeetingCreator")
+  meetingAttendances  MeetingAttendee[]
+  responsibleTasks    Task[]           @relation("TaskResponsible")
+  assignedTasks       Task[]           @relation("TaskAssigner")
+  minutesRecorded     MeetingMinute[]  @relation("MinuteRecorder")
+  notifications       Notification[]
+  scoreEvents         ScoreEvent[]
+}
+
+enum MeetingStatus {
+  PENDING_APPROVAL // در انتظار تایید حاضرین
+  CONFIRMED        // تایید و قطعی شد
+  RESCHEDULE_PROPOSED // زمان جایگزین پیشنهاد شده
+  REJECTED
+  DONE
+  CANCELED
+}
+
+model Meeting {
+  id           String    @id @default(cuid())
+  title        String
+  description  String?
+  date         DateTime  // تاریخ و ساعت شروع جلسه (میلادی ذخیره می‌شود، در UI شمسی نمایش داده می‌شود)
+  endDate      DateTime  // پایان جلسه، برای محاسبه تداخل زمانی
+  location     String?
+  status       MeetingStatus @default(PENDING_APPROVAL)
+  creatorId    String
+  creator      User      @relation("MeetingCreator", fields: [creatorId], references: [id])
+  attendees    MeetingAttendee[]
+  minute       MeetingMinute?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+enum AttendeeResponse {
+  PENDING
+  ACCEPTED
+  REJECTED
+  PROPOSED_NEW_TIME
+}
+
+model MeetingAttendee {
+  id              String   @id @default(cuid())
+  meetingId       String
+  meeting         Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  response        AttendeeResponse @default(PENDING)
+  proposedDate    DateTime? // در صورت پیشنهاد زمان جایگزین
+  proposedEndDate DateTime?
+  note            String?
+  respondedAt     DateTime?
+
+  @@unique([meetingId, userId])
+}
+
+// صورتجلسه رسمی مرتبط با یک جلسه - بر اساس فرم G20 ادب‌ویزا
+model MeetingMinute {
+  id           String   @id @default(cuid())
+  number       String   @unique // شماره صورتجلسه، مثلا 1404/الف/110
+  meetingId    String   @unique
+  meeting      Meeting  @relation(fields: [meetingId], references: [id])
+  recorderId   String   // مسئول تنظیم صورتجلسه
+  recorder     User     @relation("MinuteRecorder", fields: [recorderId], references: [id])
+  summary      String?  // خلاصه مذاکرات جلسه
+  attachmentUrl String?
+  tasks        Task[]
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+enum TaskPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+// وضعیت رنگی تسک - دقیقا منطبق با ستون رنگی فرم پایش (قرمز/زرد/سبز)
+enum TaskStatus {
+  GREEN_DONE      // اقدام شد (سبز)
+  YELLOW_DUE_SOON // نزدیک به مهلت (زرد)
+  RED_OVERDUE     // گذشته از مهلت (قرمز)
+  IN_PROGRESS     // در حال انجام - هنوز به بازه هشدار نرسیده
+}
+
+// مصوبه/تسک برخاسته از صورتجلسه - می‌تواند مستقل هم اساین شود
+model Task {
+  id               String       @id @default(cuid())
+  title            String       // موضوع مصوبه
+  description      String?
+  minuteId         String?
+  minute           MeetingMinute? @relation(fields: [minuteId], references: [id])
+  responsibleId    String
+  responsible      User         @relation("TaskResponsible", fields: [responsibleId], references: [id])
+  assignerId       String
+  assigner         User         @relation("TaskAssigner", fields: [assignerId], references: [id])
+  priority         TaskPriority @default(NORMAL)
+  dueDate          DateTime
+  status           TaskStatus   @default(IN_PROGRESS)
+  isRecurring      Boolean      @default(false)
+  recurrenceRule   String?      // توضیح تکرار، مثلا "ماهانه"
+  explanation      String?      // توضیحات (مطابق ستون توضیحات فرم)
+  needsApproval    Boolean      @default(true)
+  approvalStatus   TaskApprovalStatus @default(PENDING)
+  proposedDueDate  DateTime?    // پیشنهاد ددلاین جایگزین توسط مسئول تسک
+  doneAt           DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+}
+
+enum TaskApprovalStatus {
+  PENDING            // منتظر تایید فرد مسئول
+  ACCEPTED
+  REJECTED
+  RESCHEDULE_PROPOSED
+}
+
+enum NotificationChannel {
+  IN_APP
+  SMS
+  BOTH
+}
+
+enum NotificationType {
+  MEETING_INVITE
+  MEETING_REMINDER_DAY
+  MEETING_REMINDER_HOUR
+  MEETING_REMINDER_MINUTES
+  MEETING_STATUS_CHANGE
+  TASK_ASSIGNED
+  TASK_DUE_SOON
+  TASK_OVERDUE
+  TASK_STATUS_CHANGE
+  GENERAL
+}
+
+model Notification {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  type         NotificationType
+  title        String
+  message      String
+  channel      NotificationChannel @default(IN_APP)
+  relatedMeetingId String?
+  relatedTaskId    String?
+  isRead       Boolean  @default(false)
+  smsSent      Boolean  @default(false)
+  smsSentAt    DateTime?
+  createdAt    DateTime @default(now())
+}
+
+// رویداد امتیازی - زیرساخت سیستم امتیازدهی (فعلا غیرفعال طبق درخواست، اما مدل آماده است)
+model ScoreEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  points    Int
+  reason    String
+  createdAt DateTime @default(now())
+}
